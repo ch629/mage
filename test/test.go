@@ -1,6 +1,6 @@
 //+build mage
 
-package mage
+package test
 
 import (
 	"bufio"
@@ -44,11 +44,6 @@ type (
 		Coverage float32
 	}
 )
-
-func Build() error {
-	//sh.Run("")
-	return nil
-}
 
 // Check validates the test coverage
 func (Test) Check() (err error) {
