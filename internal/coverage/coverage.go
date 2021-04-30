@@ -1,10 +1,13 @@
 package coverage
 
 import (
+	"bytes"
 	"fmt"
 	"github.com/ch629/mage/internal/project"
 	"github.com/ch629/mage/internal/sh"
+	"github.com/magefile/mage/mg"
 	"io"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -12,33 +15,49 @@ import (
 	"text/tabwriter"
 )
 
+const coverageFileName = "coverage.out"
+
 var (
-	covRegex     = regexp.MustCompile(`[0-9.]+%`)
-	cov          []PackageTestCoverage
-	covInit      sync.Once
+	covRegex = regexp.MustCompile(`[0-9.]+%`)
+	cov      []PackageTestCoverage
+	covInit  sync.Once
 )
 
 type (
+	// Options is the code coverage requirements
 	Options struct {
 		// TODO: Exclusions
 		Threshold float32
 	}
 
+	// PackageTestCoverage groups up each Package with it's Coverage percentage
 	PackageTestCoverage struct {
-		Package  string
-		Coverage float32
+		Package     string
+		Coverage    float32
+		FailureText string
 	}
 )
 
 // FormatCoverageReport writes the Coverage report to the io.Writer
 // returns failed if any of the packages is below the threshold
 // returns an error if any errors writing to the writer
-func FormatCoverageReport(options Options, cov []PackageTestCoverage, w io.Writer) (failed bool, err error) {
+func FormatCoverageReport(options Options, cov []PackageTestCoverage, w io.Writer) (belowCoverage bool, err error) {
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+	failBuf := &bytes.Buffer{}
 	for _, c := range cov {
 		if c.Coverage < options.Threshold {
-			failed = true
-			if _, err = fmt.Fprintf(tw, "\t%v\t%05.2f%%\n", c.Package, c.Coverage); err != nil {
+			belowCoverage = true
+			failedStr := ""
+			// Tests belowCoverage
+			if len(c.FailureText) > 0 {
+				failedStr = "FAILED"
+				_, _ = fmt.Fprintln(failBuf)
+				if _, err = fmt.Fprintln(failBuf, c.FailureText); err != nil {
+					return
+				}
+			}
+
+			if _, err = fmt.Fprintf(tw, "\t%v\t%05.2f%%\t%v\n", c.Package, c.Coverage, failedStr); err != nil {
 				return
 			}
 		}
@@ -46,6 +65,8 @@ func FormatCoverageReport(options Options, cov []PackageTestCoverage, w io.Write
 	if err = tw.Flush(); err != nil {
 		return
 	}
+
+	_, err = io.Copy(w, failBuf)
 
 	return
 }
@@ -62,10 +83,14 @@ func Coverage() ([]PackageTestCoverage, error) {
 
 		for i, pkg := range pkgNames {
 			var res string
-			if res, err = sh.OutGo("test", pkg, "-covermode=count"); err != nil {
-				return
-			}
 			cov[i] = PackageTestCoverage{Package: strings.TrimPrefix(pkg, "./")}
+			if res, err = sh.OutGoTest(pkg, "-covermode=count"); err != nil {
+				// Likely to just be a test failure
+				cov[i].Coverage = 0
+				cov[i].FailureText = res
+				err = nil
+				continue
+			}
 			if strings.Contains(res, "no test files") {
 				cov[i].Coverage = 0
 			} else {
@@ -79,6 +104,32 @@ func Coverage() ([]PackageTestCoverage, error) {
 	})
 
 	return cov, err
+}
+
+// Generate generates the coverage report output file
+func Generate() error {
+	return sh.GoTest(fmt.Sprintf("-coverprofile=%s", coverageFileName), "./...")
+}
+
+// HTMLReport creates the HTML report of an existing coverage report
+func HTMLReport() error {
+	mg.Deps(Generate)
+	return sh.GoCover(fmt.Sprintf("-html=%s", coverageFileName))
+}
+
+// Report outputs the function level coverage of an existing report
+func Report() error {
+	mg.Deps(Generate)
+	return sh.GoCover(fmt.Sprintf("-func=%s", coverageFileName))
+}
+
+// Cleanup deletes the coverage report file
+func Cleanup() error {
+	err := os.Remove(coverageFileName)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
 }
 
 func covPercentFromLine(line string) (float32, error) {
